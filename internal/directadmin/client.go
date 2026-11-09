@@ -75,21 +75,101 @@ func (c *Client) Records(ctx context.Context) ([]Endpoint, error) {
 	return all, nil
 }
 
-// ApplyChanges deletes the old targets, then creates the new ones.
-// Names that match no configured zone are rejected.
+// ApplyChanges writes one name at a time. A replacement is added before the
+// old target is removed, so the name keeps answering while DirectAdmin has
+// both values. A name that is only going away is deleted. Replacing the same
+// target (a TTL change) deletes that one value and adds it back.
 func (c *Client) ApplyChanges(ctx context.Context, changes ChangeSet) error {
 	c.log.Info("apply changes", "create", len(changes.Create), "delete", len(changes.Delete))
-	for _, ep := range changes.Delete {
-		if err := c.mutate(ctx, ep, false); err != nil {
-			return err
+	for _, change := range planChanges(changes) {
+		inDelete := map[string]struct{}{}
+		for _, target := range change.delete {
+			inDelete[target] = struct{}{}
 		}
-	}
-	for _, ep := range changes.Create {
-		if err := c.mutate(ctx, ep, true); err != nil {
-			return err
+		inCreate := map[string]struct{}{}
+		for _, target := range change.create {
+			inCreate[target] = struct{}{}
+		}
+		for _, target := range change.create {
+			if _, same := inDelete[target]; same {
+				continue
+			}
+			if err := c.mutate(ctx, change.endpoint(target), true); err != nil {
+				return err
+			}
+		}
+		for _, target := range change.delete {
+			if _, same := inCreate[target]; !same {
+				continue
+			}
+			if err := c.mutate(ctx, change.endpoint(target), false); err != nil {
+				return err
+			}
+			if err := c.mutate(ctx, change.endpoint(target), true); err != nil {
+				return err
+			}
+		}
+		for _, target := range change.delete {
+			if _, same := inCreate[target]; same {
+				continue
+			}
+			if err := c.mutate(ctx, change.endpoint(target), false); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
+}
+
+type recordChange struct {
+	recordType string
+	dnsName    string
+	ttl        int64
+	create     []string
+	delete     []string
+}
+
+func (c recordChange) endpoint(target string) Endpoint {
+	return Endpoint{
+		DNSName:    c.dnsName,
+		RecordType: c.recordType,
+		RecordTTL:  c.ttl,
+		Targets:    []string{target},
+	}
+}
+
+func planChanges(changes ChangeSet) []recordChange {
+	order := []string{}
+	grouped := map[string]*recordChange{}
+	note := func(ep Endpoint, create bool) {
+		if ep.RecordType == "" || len(ep.Targets) == 0 {
+			return
+		}
+		key := ep.RecordType + " " + ep.DNSName
+		change := grouped[key]
+		if change == nil {
+			change = &recordChange{recordType: ep.RecordType, dnsName: ep.DNSName}
+			grouped[key] = change
+			order = append(order, key)
+		}
+		if create {
+			change.ttl = ep.RecordTTL
+			change.create = append(change.create, ep.Targets...)
+			return
+		}
+		change.delete = append(change.delete, ep.Targets...)
+	}
+	for _, ep := range changes.Create {
+		note(ep, true)
+	}
+	for _, ep := range changes.Delete {
+		note(ep, false)
+	}
+	out := make([]recordChange, 0, len(order))
+	for _, key := range order {
+		out = append(out, *grouped[key])
+	}
+	return out
 }
 
 func (c *Client) mutate(ctx context.Context, ep Endpoint, create bool) error {

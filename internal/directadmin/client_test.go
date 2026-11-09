@@ -102,13 +102,45 @@ func TestApplyUsesV021AndLegacyKeys(t *testing.T) {
 	if err := client.ApplyChanges(context.Background(), changes); err != nil {
 		t.Fatal(err)
 	}
-	if strings.Join(actions, ",") != "select,select,add,add" {
+	if strings.Join(actions, ",") != "add,add,select,select" {
 		t.Fatalf("actions %v", actions)
 	}
 
 	legacy, err := DecodeChanges([]byte(`{"Create":[{"dnsName":"www.example.com","recordType":"A","targets":["203.0.113.5"]}]}`))
 	if err != nil || len(legacy.Create) != 1 {
 		t.Fatalf("legacy %#v %v", legacy, err)
+	}
+}
+
+func TestReplacementAddsBeforeDelete(t *testing.T) {
+	var steps []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		name := q.Get("name")
+		if name == "" {
+			name = q.Get("arecs0")
+		}
+		steps = append(steps, q.Get("action")+":"+name)
+		_, _ = io.WriteString(w, `{"error":"0"}`)
+	}))
+	defer srv.Close()
+	client := NewClient(srv.URL, "user", "secret", []string{"example.com"}, false, 60, nil)
+	err := client.ApplyChanges(context.Background(), ChangeSet{
+		Delete: []Endpoint{
+			{DNSName: "gone.example.com", RecordType: "A", Targets: []string{"203.0.113.1"}},
+			{DNSName: "www.example.com", RecordType: "A", Targets: []string{"203.0.113.3"}},
+		},
+		Create: []Endpoint{
+			{DNSName: "www.example.com", RecordType: "A", Targets: []string{"203.0.113.4"}, RecordTTL: 60},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := strings.Join(steps, ",")
+	want := "add:www,select:name=www&value=203.0.113.3,select:name=gone&value=203.0.113.1"
+	if got != want {
+		t.Fatalf("order %s", got)
 	}
 }
 
