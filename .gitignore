@@ -1,0 +1,5 @@
+/webhook
+/bin/
+*.exe
+*.test
+coverage.out
