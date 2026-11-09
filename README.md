@@ -77,4 +77,4 @@ Creates send `ttl`. An endpoint `recordTTL` wins. Otherwise the webhook uses `DA
 go test ./...
 ```
 
-Pushes to `mbono/work` publish `ghcr.io/mockshox/external-dns-webhook-directadmin:work`. A `v*` tag publishes that version and moves `latest`. The workflow tries to mark the package public; if that call is rejected, set the package visibility in GitHub once.
+Pushes to `mbono/work` publish `ghcr.io/mockshox/external-dns-webhook-directadmin:work`. A tag `v1.2.3` publishes `1.2.3`, `1.2`, `1`, and `latest`. While the major version is 0, the major tag is omitted, so `v0.2.1` publishes `0.2.1`, `0.2`, and `latest`. A pre-release such as `v1.2.3-rc.1` publishes only `1.2.3-rc.1`. A tag that is not a semantic version fails the image job. The workflow tries to mark the package public; if that call is rejected, set the package visibility in GitHub once.

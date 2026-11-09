@@ -33,25 +33,26 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Image tags
-        id: tags
+      - uses: docker/metadata-action@v5
+        id: meta
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=raw,value=work,enable=${{ github.ref == 'refs/heads/mbono/work' }}
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}},enable=${{ !startsWith(github.ref, 'refs/tags/v0.') }}
+      - name: Require a semantic version tag
+        if: startsWith(github.ref, 'refs/tags/') && steps.meta.outputs.version == ''
         run: |
-          image=ghcr.io/mockshox/external-dns-webhook-directadmin
-          {
-            echo "tags<<EOF"
-            if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
-              echo "${image}:${GITHUB_REF_NAME}"
-              echo "${image}:latest"
-            else
-              echo "${image}:work"
-            fi
-            echo "EOF"
-          } >> "$GITHUB_OUTPUT"
+          echo "::error::${GITHUB_REF_NAME} is not a semantic version. Use vMAJOR.MINOR.PATCH."
+          exit 1
       - uses: docker/build-push-action@v6
         with:
           context: .
           push: true
-          tags: ${{ steps.tags.outputs.tags }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
       - name: Make the package public
         continue-on-error: true
         env:
