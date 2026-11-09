@@ -19,8 +19,8 @@ func TestLoadZonesAndDefaults(t *testing.T) {
 	if cfg.Insecure {
 		t.Fatal("TLS verification is on unless DA_INSECURE is set")
 	}
-	if cfg.WebhookAddress != "127.0.0.1:8888" || cfg.HealthAddress != "0.0.0.0:8080" {
-		t.Fatalf("addresses webhook=%s health=%s", cfg.WebhookAddress, cfg.HealthAddress)
+	if cfg.WebhookAddress != "127.0.0.1:8888" || cfg.MetricsAddress != ":8080" {
+		t.Fatalf("addresses webhook=%s metrics=%s", cfg.WebhookAddress, cfg.MetricsAddress)
 	}
 	if len(cfg.Zones) != 2 || cfg.Zones[0] != "example.com" || cfg.Zones[1] != "example.org" {
 		t.Fatalf("zones %#v", cfg.Zones)

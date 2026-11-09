@@ -9,7 +9,7 @@ import (
 
 const (
 	defaultWebhook = "127.0.0.1:8888"
-	defaultHealth  = "0.0.0.0:8080"
+	defaultMetrics = ":8080"
 )
 
 // Config is the process configuration.
@@ -21,7 +21,7 @@ type Config struct {
 	Insecure       bool
 	TTL            int64
 	WebhookAddress string
-	HealthAddress  string
+	MetricsAddress string
 }
 
 // Load reads configuration from getenv, which is usually os.Getenv.
@@ -32,7 +32,7 @@ func Load(getenv func(string) string) (Config, error) {
 		LoginKey:       getenv("DA_LOGIN_KEY"),
 		Insecure:       truthy(getenv("DA_INSECURE")),
 		WebhookAddress: valueOr(getenv("WEBHOOK_ADDRESS"), defaultWebhook),
-		HealthAddress:  valueOr(getenv("HEALTH_ADDRESS"), defaultHealth),
+		MetricsAddress: valueOr(getenv("METRICS_ADDRESS"), defaultMetrics),
 	}
 	zones := splitList(getenv("DA_DOMAINS"))
 	if len(zones) == 0 {

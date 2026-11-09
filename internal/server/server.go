@@ -33,14 +33,6 @@ func New(client *directadmin.Client, logger *slog.Logger) http.Handler {
 	return mux
 }
 
-// Health is the process probe served on the chart's port 8080.
-func Health() http.Handler {
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /healthz", health)
-	mux.HandleFunc("GET /health", health)
-	return mux
-}
-
 func health(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "text/plain")
 	w.WriteHeader(http.StatusOK)

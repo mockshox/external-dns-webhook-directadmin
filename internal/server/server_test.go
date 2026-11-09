@@ -32,13 +32,6 @@ func TestNegotiateAndRecords(t *testing.T) {
 	if records.status != 200 || !strings.Contains(records.body, `"dnsName":"www.example.com"`) {
 		t.Fatalf("records %d %s", records.status, records.body)
 	}
-
-	health := httptest.NewServer(Health())
-	defer health.Close()
-	probe := get(t, health.URL+"/healthz")
-	if probe.status != 200 || probe.body != "ok" {
-		t.Fatalf("health %d %s", probe.status, probe.body)
-	}
 }
 
 func TestAdjustEchoesAndApplyReturns204(t *testing.T) {

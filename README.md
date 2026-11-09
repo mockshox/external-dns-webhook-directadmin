@@ -5,7 +5,7 @@ The webhook speaks [DirectAdmin](https://docs.directadmin.com/developer/api/) `C
 
 ## Run
 
-ExternalDNS chart 1.21 probes port 8080 on the pod IP. This process serves `/healthz` there. The ExternalDNS API listens on `127.0.0.1:8888`, which is ExternalDNS's default webhook URL. The chart's ClusterIP also publishes port 8080; that port is the health check, not the DNS API.
+ExternalDNS chart probes port 8080 on the pod IP. This process serves `/healthz`, `/ready`, and `/metrics` there. Both probes stay down until the webhook is listening. The ExternalDNS API listens on `127.0.0.1:8888`, which is ExternalDNS's default webhook URL. The chart's ClusterIP also publishes port 8080; that port is the probe and metrics port, not the DNS API. Images are published for `linux/amd64` and `linux/arm64`.
 
 ```yaml
 provider:
@@ -63,7 +63,7 @@ Point `DA_URL` at the panel, for example `https://<server>.cyber-folks.pl:2223`.
 | `DA_INSECURE` | | false | `true` skips TLS verification |
 | `DA_TTL` | | 60 | Record TTL in seconds when ExternalDNS omits `recordTTL`. `0` leaves the panel default |
 | `WEBHOOK_ADDRESS` | | `127.0.0.1:8888` | ExternalDNS API |
-| `HEALTH_ADDRESS` | | `0.0.0.0:8080` | `/healthz` for the chart probe |
+| `METRICS_ADDRESS` | | `:8080` | `/healthz`, `/ready`, and `/metrics` |
 
 Supported types are A, AAAA, CNAME, and TXT. A name outside the configured zones fails the apply. A zone dump that is not JSON fails the list, so ExternalDNS retries instead of treating the zone as empty.
 
