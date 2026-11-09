@@ -22,7 +22,7 @@ func main() {
 		logger.Error("configuration", "err", err)
 		os.Exit(1)
 	}
-	client := directadmin.NewClient(cfg.URL, cfg.Username, cfg.LoginKey, cfg.Zones, cfg.Insecure, logger)
+	client := directadmin.NewClient(cfg.URL, cfg.Username, cfg.LoginKey, cfg.Zones, cfg.Insecure, cfg.TTL, logger)
 
 	webhook := &http.Server{
 		Addr:              cfg.WebhookAddress,

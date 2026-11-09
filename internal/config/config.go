@@ -3,6 +3,7 @@ package config
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 )
 
@@ -18,6 +19,7 @@ type Config struct {
 	LoginKey       string
 	Zones          []string
 	Insecure       bool
+	TTL            int64
 	WebhookAddress string
 	HealthAddress  string
 }
@@ -41,6 +43,11 @@ func Load(getenv func(string) string) (Config, error) {
 		return Config{}, err
 	}
 	cfg.Zones = filtered
+	ttl, err := ttlSeconds(getenv("DA_TTL"))
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.TTL = ttl
 
 	var missing []string
 	if cfg.URL == "" {
@@ -90,6 +97,18 @@ func splitList(raw string) []string {
 		}
 	}
 	return out
+}
+
+func ttlSeconds(raw string) (int64, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return 60, nil
+	}
+	n, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || n < 0 {
+		return 0, fmt.Errorf("DA_TTL must be a non-negative number of seconds")
+	}
+	return n, nil
 }
 
 func valueOr(value, fallback string) string {

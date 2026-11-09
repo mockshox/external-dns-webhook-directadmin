@@ -51,14 +51,31 @@ func matchZone(name string, zones []string) (string, bool) {
 
 func fqdn(name, zone string) string {
 	name = strings.TrimSuffix(name, ".")
-	switch name {
-	case "", "@", zone:
-		return zone
+	var out string
+	switch {
+	case name == "" || name == "@" || strings.EqualFold(name, zone):
+		out = zone
+	case strings.HasSuffix(strings.ToLower(name), "."+strings.ToLower(zone)):
+		out = name
+	default:
+		out = name + "." + zone
 	}
-	if name == zone || strings.HasSuffix(name, "."+zone) {
-		return name
+	return strings.ToLower(out)
+}
+
+// canonicalTarget makes a CNAME value absolute when it already contains a dot.
+// DirectAdmin treats a CNAME without a trailing dot as relative to the zone, so
+// "foo.other.com" would be stored as foo.other.com.<zone>. A single label is
+// left unchanged.
+func canonicalTarget(recordType, value string) string {
+	if !strings.EqualFold(recordType, "CNAME") {
+		return value
 	}
-	return name + "." + zone
+	value = strings.TrimSpace(value)
+	if value == "" || strings.HasSuffix(value, ".") || !strings.Contains(value, ".") {
+		return value
+	}
+	return value + "."
 }
 
 func relative(dnsName, zone string) string {

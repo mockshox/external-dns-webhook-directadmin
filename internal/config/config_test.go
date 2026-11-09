@@ -25,6 +25,30 @@ func TestLoadZonesAndDefaults(t *testing.T) {
 	if len(cfg.Zones) != 2 || cfg.Zones[0] != "example.com" || cfg.Zones[1] != "example.org" {
 		t.Fatalf("zones %#v", cfg.Zones)
 	}
+	if cfg.TTL != 60 {
+		t.Fatalf("default ttl %d", cfg.TTL)
+	}
+}
+
+func TestLoadTTL(t *testing.T) {
+	env := map[string]string{
+		"DA_URL":       "https://panel.example:2222",
+		"DA_USERNAME":  "user",
+		"DA_LOGIN_KEY": "key",
+		"DA_DOMAIN":    "example.com",
+		"DA_TTL":       "120",
+	}
+	cfg, err := Load(func(k string) string { return env[k] })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.TTL != 120 {
+		t.Fatalf("ttl %d", cfg.TTL)
+	}
+	env["DA_TTL"] = "nope"
+	if _, err := Load(func(k string) string { return env[k] }); err == nil {
+		t.Fatal("expected invalid DA_TTL")
+	}
 }
 
 func TestLoadDomainFallbackAndFilter(t *testing.T) {

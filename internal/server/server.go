@@ -89,13 +89,14 @@ func (h *handler) adjust(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), statusFor(err))
 		return
 	}
-	if !json.Valid(raw) {
+	adjusted, err := directadmin.AdjustEndpoints(raw)
+	if err != nil {
 		http.Error(w, "invalid json", http.StatusBadRequest)
 		return
 	}
 	w.Header().Set("Content-Type", mediaType)
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(raw)
+	_, _ = w.Write(adjusted)
 }
 
 func (h *handler) fail(w http.ResponseWriter, what string, err error) {

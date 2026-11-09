@@ -3,6 +3,7 @@ package directadmin
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 )
 
 // ChangeSet is an ExternalDNS plan. Delete is applied before Create.
@@ -57,4 +58,27 @@ func firstList(body map[string]json.RawMessage, keys ...string) ([]Endpoint, err
 
 func jsonUnmarshal(body string, dest any) error {
 	return json.Unmarshal([]byte(body), dest)
+}
+
+// AdjustEndpoints canonicalizes names and CNAME targets before ExternalDNS
+// diffs them against Records. Other fields are preserved.
+func AdjustEndpoints(raw []byte) ([]byte, error) {
+	var endpoints []map[string]any
+	if err := json.Unmarshal(raw, &endpoints); err != nil {
+		return nil, err
+	}
+	for _, ep := range endpoints {
+		recordType := strings.ToUpper(asString(ep["recordType"]))
+		if name := asString(ep["dnsName"]); name != "" {
+			ep["dnsName"] = strings.ToLower(strings.TrimSuffix(name, "."))
+		}
+		targets, ok := ep["targets"].([]any)
+		if !ok {
+			continue
+		}
+		for i, target := range targets {
+			targets[i] = canonicalTarget(recordType, asString(target))
+		}
+	}
+	return json.Marshal(endpoints)
 }

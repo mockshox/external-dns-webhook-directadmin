@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -18,12 +19,15 @@ type Client struct {
 	user    string
 	key     string
 	zones   []string
+	ttl     int64
 	http    *http.Client
 	log     *slog.Logger
 }
 
 // NewClient builds a client. zones are the DirectAdmin domain names to manage.
-func NewClient(baseURL, user, key string, zones []string, insecure bool, logger *slog.Logger) *Client {
+// ttl is the record TTL, in seconds, used when ExternalDNS omits recordTTL.
+// Zero leaves the panel default in place.
+func NewClient(baseURL, user, key string, zones []string, insecure bool, ttl int64, logger *slog.Logger) *Client {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -40,6 +44,7 @@ func NewClient(baseURL, user, key string, zones []string, insecure bool, logger 
 		user:    user,
 		key:     key,
 		zones:   append([]string(nil), zones...),
+		ttl:     ttl,
 		http:    &http.Client{Timeout: 30 * time.Second, Transport: transport},
 		log:     logger,
 	}
@@ -101,7 +106,7 @@ func (c *Client) mutate(ctx context.Context, ep Endpoint, create bool) error {
 			err  error
 		)
 		if create {
-			body, err = c.add(ctx, zone, ep.RecordType, ep.DNSName, target)
+			body, err = c.add(ctx, zone, ep.RecordType, ep.DNSName, target, c.recordTTL(ep))
 		} else {
 			body, err = c.delete(ctx, zone, ep.RecordType, ep.DNSName, target)
 		}
@@ -115,7 +120,14 @@ func (c *Client) mutate(ctx context.Context, ep Endpoint, create bool) error {
 	return nil
 }
 
-func (c *Client) add(ctx context.Context, zone, recordType, dnsName, value string) (string, error) {
+func (c *Client) recordTTL(ep Endpoint) int64 {
+	if ep.RecordTTL > 0 {
+		return ep.RecordTTL
+	}
+	return c.ttl
+}
+
+func (c *Client) add(ctx context.Context, zone, recordType, dnsName, value string, ttl int64) (string, error) {
 	if !supported(recordType) {
 		return "", fmt.Errorf("unsupported record type %q", recordType)
 	}
@@ -124,13 +136,16 @@ func (c *Client) add(ctx context.Context, zone, recordType, dnsName, value strin
 	q.Set("action", "add")
 	q.Set("type", recordType)
 	q.Set("name", relative(dnsName, zone))
-	q.Set("value", value)
+	q.Set("value", canonicalTarget(recordType, value))
+	if ttl > 0 {
+		q.Set("ttl", strconv.FormatInt(ttl, 10))
+	}
 	q.Set("json", "yes")
 	body, err := c.do(ctx, q)
 	if err != nil {
 		return "", err
 	}
-	c.log.Info("directadmin add", "type", recordType, "name", dnsName, "value", value, "body", clip(body))
+	c.log.Info("directadmin add", "type", recordType, "name", dnsName, "value", value, "ttl", ttl, "body", clip(body))
 	return body, nil
 }
 
@@ -144,7 +159,7 @@ func (c *Client) delete(ctx context.Context, zone, recordType, dnsName, value st
 	q := url.Values{}
 	q.Set("domain", zone)
 	q.Set("action", "select")
-	q.Set(key, "name="+relative(dnsName, zone)+"&value="+value)
+	q.Set(key, "name="+relative(dnsName, zone)+"&value="+canonicalTarget(recordType, value))
 	q.Set("json", "yes")
 	body, err := c.do(ctx, q)
 	if err != nil {

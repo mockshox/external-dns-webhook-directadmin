@@ -16,7 +16,7 @@ func TestNegotiateAndRecords(t *testing.T) {
 		_, _ = io.WriteString(w, `{"A":{"www":"203.0.113.10"}}`)
 	}))
 	defer panel.Close()
-	client := directadmin.NewClient(panel.URL, "user", "secret", []string{"example.com"}, false, slog.New(slog.DiscardHandler))
+	client := directadmin.NewClient(panel.URL, "user", "secret", []string{"example.com"}, false, 60, slog.New(slog.DiscardHandler))
 	srv := httptest.NewServer(New(client, slog.New(slog.DiscardHandler)))
 	defer srv.Close()
 
@@ -46,17 +46,17 @@ func TestAdjustEchoesAndApplyReturns204(t *testing.T) {
 		_, _ = io.WriteString(w, `{"error":"0"}`)
 	}))
 	defer panel.Close()
-	client := directadmin.NewClient(panel.URL, "user", "secret", []string{"example.com"}, false, slog.New(slog.DiscardHandler))
+	client := directadmin.NewClient(panel.URL, "user", "secret", []string{"example.com"}, false, 60, slog.New(slog.DiscardHandler))
 	srv := httptest.NewServer(New(client, slog.New(slog.DiscardHandler)))
 	defer srv.Close()
 
-	adjust, err := http.Post(srv.URL+"/adjustendpoints", mediaType, strings.NewReader(`[{"dnsName":"www.example.com"}]`))
+	adjust, err := http.Post(srv.URL+"/adjustendpoints", mediaType, strings.NewReader(`[{"dnsName":"Alias.Example.com.","recordType":"CNAME","targets":["foo.other.com"],"recordTTL":0}]`))
 	if err != nil {
 		t.Fatal(err)
 	}
 	body, _ := io.ReadAll(adjust.Body)
 	adjust.Body.Close()
-	if adjust.StatusCode != 200 || string(body) != `[{"dnsName":"www.example.com"}]` {
+	if adjust.StatusCode != 200 || !strings.Contains(string(body), `"dnsName":"alias.example.com"`) || !strings.Contains(string(body), `"foo.other.com."`) {
 		t.Fatalf("adjust %d %s", adjust.StatusCode, body)
 	}
 

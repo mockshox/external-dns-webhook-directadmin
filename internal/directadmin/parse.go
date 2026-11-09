@@ -3,6 +3,7 @@ package directadmin
 import (
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 )
 
@@ -29,7 +30,7 @@ func parseZone(body, zone string) ([]Endpoint, error) {
 		if !supported(rec.Type) {
 			continue
 		}
-		value := stripQuotes(rec.Value)
+		value := canonicalTarget(rec.Type, stripQuotes(rec.Value))
 		if value == "" {
 			continue
 		}
@@ -37,7 +38,7 @@ func parseZone(body, zone string) ([]Endpoint, error) {
 		key := rec.Type + " " + name
 		ep := grouped[key]
 		if ep == nil {
-			ep = &Endpoint{DNSName: name, RecordType: rec.Type}
+			ep = &Endpoint{DNSName: name, RecordType: rec.Type, RecordTTL: rec.TTL}
 			grouped[key] = ep
 			order = append(order, key)
 		}
@@ -56,6 +57,7 @@ type rawRecord struct {
 	Type  string
 	Name  string
 	Value string
+	TTL   int64
 }
 
 func iterRecords(payload any) []rawRecord {
@@ -67,7 +69,7 @@ func iterRecords(payload any) []rawRecord {
 			if !ok || m["type"] == nil || m["value"] == nil {
 				continue
 			}
-			out = append(out, rawRecord{asString(m["type"]), asString(m["name"]), asString(m["value"])})
+			out = append(out, rawRecord{asString(m["type"]), asString(m["name"]), asString(m["value"]), ttlOf(m)})
 		}
 		return out
 	case map[string]any:
@@ -85,7 +87,7 @@ func iterRecords(payload any) []rawRecord {
 				if rtype == nil {
 					rtype = m["recordType"]
 				}
-				out = append(out, rawRecord{asString(rtype), asString(m["name"]), asString(m["value"])})
+				out = append(out, rawRecord{asString(rtype), asString(m["name"]), asString(m["value"]), ttlOf(m)})
 			}
 			return out
 		}
@@ -106,9 +108,9 @@ func iterDNSRecs(dnsrecs map[string]any) []rawRecord {
 			for _, item := range typed {
 				switch row := item.(type) {
 				case map[string]any:
-					out = append(out, rawRecord{rtype, asString(row["name"]), asString(row["value"])})
+					out = append(out, rawRecord{rtype, asString(row["name"]), asString(row["value"]), ttlOf(row)})
 				case string:
-					out = append(out, rawRecord{rtype, row, ""})
+					out = append(out, rawRecord{rtype, row, "", 0})
 				}
 			}
 		case map[string]any:
@@ -116,10 +118,10 @@ func iterDNSRecs(dnsrecs map[string]any) []rawRecord {
 				switch many := value.(type) {
 				case []any:
 					for _, v := range many {
-						out = append(out, rawRecord{rtype, name, asString(v)})
+						out = append(out, rawRecord{rtype, name, asString(v), 0})
 					}
 				default:
-					out = append(out, rawRecord{rtype, name, asString(value)})
+					out = append(out, rawRecord{rtype, name, asString(value), 0})
 				}
 			}
 		}
@@ -137,17 +139,17 @@ func iterTypedMaps(body map[string]any) []rawRecord {
 				if !ok {
 					continue
 				}
-				out = append(out, rawRecord{rtype, asString(m["name"]), asString(m["value"])})
+				out = append(out, rawRecord{rtype, asString(m["name"]), asString(m["value"]), ttlOf(m)})
 			}
 		case map[string]any:
 			for name, value := range items {
 				switch many := value.(type) {
 				case []any:
 					for _, v := range many {
-						out = append(out, rawRecord{rtype, name, asString(v)})
+						out = append(out, rawRecord{rtype, name, asString(v), 0})
 					}
 				default:
-					out = append(out, rawRecord{rtype, name, asString(value)})
+					out = append(out, rawRecord{rtype, name, asString(value), 0})
 				}
 			}
 		}
@@ -204,6 +206,24 @@ func benignError(value any) bool {
 		return true
 	default:
 		return false
+	}
+}
+
+func ttlOf(record map[string]any) int64 {
+	switch typed := record["ttl"].(type) {
+	case string:
+		n, err := strconv.ParseInt(strings.TrimSpace(typed), 10, 64)
+		if err != nil || n < 0 {
+			return 0
+		}
+		return n
+	case float64:
+		if typed < 0 {
+			return 0
+		}
+		return int64(typed)
+	default:
+		return 0
 	}
 }
 
