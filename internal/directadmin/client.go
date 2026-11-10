@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math/rand/v2"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -14,7 +15,10 @@ import (
 	"time"
 )
 
-const maxAttempts = 3
+const (
+	maxAttempts  = 3
+	maxRetryWait = 15 * time.Second
+)
 
 // Observer records DirectAdmin calls and whether a list or apply finished.
 // Begin marks the start of a list or apply. Finish applies that outcome.
@@ -35,6 +39,7 @@ type Client struct {
 	http     *http.Client
 	log      *slog.Logger
 	observer Observer
+	sleep    func(context.Context, time.Duration) error
 }
 
 // NewClient builds a client. zones are the DirectAdmin domain names to manage.
@@ -58,8 +63,13 @@ func NewClient(baseURL, user, key string, zones []string, insecure bool, ttl int
 		key:     key,
 		zones:   append([]string(nil), zones...),
 		ttl:     ttl,
-		http:    &http.Client{Timeout: 30 * time.Second, Transport: transport},
-		log:     logger,
+		http: &http.Client{
+			Timeout:       30 * time.Second,
+			Transport:     transport,
+			CheckRedirect: refuseRedirect,
+		},
+		log:   logger,
+		sleep: pause,
 	}
 }
 
@@ -88,7 +98,7 @@ func (c *Client) Records(ctx context.Context) ([]Endpoint, error) {
 			c.finish("list", token, err)
 			return nil, err
 		}
-		all = append(all, records...)
+		all = append(all, withDefaultTTL(records, c.ttl)...)
 	}
 	if all == nil {
 		all = []Endpoint{}
@@ -325,7 +335,11 @@ func (c *Client) do(ctx context.Context, query url.Values) (string, error) {
 	var last error
 	for attempt := 0; attempt < maxAttempts; attempt++ {
 		if attempt > 0 {
-			if err := pause(ctx, time.Duration(attempt)*100*time.Millisecond); err != nil {
+			sleep := c.sleep
+			if sleep == nil {
+				sleep = pause
+			}
+			if err := sleep(ctx, retryDelay(attempt, last)); err != nil {
 				return "", err
 			}
 		}
@@ -358,7 +372,7 @@ func (c *Client) doOnce(ctx context.Context, query url.Values) (string, error) {
 	}
 	if resp.StatusCode >= 300 {
 		c.log.Debug("directadmin http error", "status", resp.StatusCode, "body", clip(string(body)))
-		return "", &statusError{code: resp.StatusCode}
+		return "", &statusError{code: resp.StatusCode, retryAfter: retryAfterHeader(resp.Header)}
 	}
 	return string(body), nil
 }
@@ -382,7 +396,7 @@ func resultOf(err error) string {
 }
 
 func retryable(err error) bool {
-	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, errRedirect) || errors.Is(err, errUnrecognizedResponse) {
 		return false
 	}
 	var status *statusError
@@ -410,7 +424,7 @@ func pause(ctx context.Context, d time.Duration) error {
 func scrubTransport(err error) error {
 	var uerr *url.Error
 	if !errors.As(err, &uerr) {
-		return err
+		return &transportError{err: err}
 	}
 	loc := uerr.URL
 	if u, perr := url.Parse(uerr.URL); perr == nil {
@@ -418,11 +432,122 @@ func scrubTransport(err error) error {
 		u.User = nil
 		loc = u.String()
 	}
-	return fmt.Errorf("%s %s: %w", uerr.Op, loc, uerr.Err)
+	return &transportError{err: fmt.Errorf("%s %s: %w", uerr.Op, loc, uerr.Err)}
 }
 
+// PanelUnavailable reports that DirectAdmin could not serve this call.
+// A rejected record is available: the panel answered.
+func PanelUnavailable(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) || errors.Is(err, errRedirect) {
+		return true
+	}
+	var transport *transportError
+	if errors.As(err, &transport) {
+		return true
+	}
+	var status *statusError
+	if errors.As(err, &status) {
+		return status.code == http.StatusUnauthorized ||
+			status.code == http.StatusForbidden ||
+			status.code == http.StatusTooManyRequests ||
+			status.code >= 500
+	}
+	return false
+}
+
+func refuseRedirect(*http.Request, []*http.Request) error {
+	return errRedirect
+}
+
+func retryDelay(attempt int, err error) time.Duration {
+	var status *statusError
+	if errors.As(err, &status) && status.code == http.StatusTooManyRequests && status.retryAfter > 0 {
+		extra := time.Duration(rand.Int64N(int64(250 * time.Millisecond)))
+		return capWait(status.retryAfter + extra)
+	}
+	shift := attempt - 1
+	if shift < 0 {
+		shift = 0
+	}
+	if shift > 4 {
+		shift = 4
+	}
+	base := 200 * time.Millisecond * time.Duration(1<<shift)
+	if base > 5*time.Second {
+		base = 5 * time.Second
+	}
+	return jitter(base)
+}
+
+func retryAfterHeader(h http.Header) time.Duration {
+	raw := strings.TrimSpace(h.Get("Retry-After"))
+	if raw == "" {
+		return 0
+	}
+	if secs, err := strconv.Atoi(raw); err == nil {
+		if secs < 0 {
+			return 0
+		}
+		return time.Duration(secs) * time.Second
+	}
+	when, err := http.ParseTime(raw)
+	if err != nil {
+		return 0
+	}
+	d := time.Until(when)
+	if d < 0 {
+		return 0
+	}
+	return d
+}
+
+func capWait(d time.Duration) time.Duration {
+	if d < 0 {
+		return 0
+	}
+	if d > maxRetryWait {
+		return maxRetryWait
+	}
+	return d
+}
+
+func jitter(d time.Duration) time.Duration {
+	if d <= 0 {
+		return 0
+	}
+	span := int64(d / 2)
+	if span <= 0 {
+		return d
+	}
+	return d/2 + time.Duration(rand.Int64N(span))
+}
+
+type transportError struct {
+	err error
+}
+
+func (e *transportError) Error() string {
+	if e.err == nil {
+		return "directadmin transport"
+	}
+	return e.err.Error()
+}
+
+func (e *transportError) Unwrap() error {
+	if e.err == nil {
+		return nil
+	}
+	return e.err
+}
+
+var errRedirect = errors.New("directadmin: redirects are not followed")
+
 type statusError struct {
-	code int
+	code       int
+	retryAfter time.Duration
 }
 
 func (e *statusError) Error() string {
@@ -475,6 +600,8 @@ func editRejected(err error) bool {
 	return errors.As(err, &panel)
 }
 
+var errUnrecognizedResponse = errors.New("directadmin: unrecognized response")
+
 func mutationError(body string) error {
 	body = strings.TrimSpace(body)
 	if body == "" {
@@ -485,11 +612,14 @@ func mutationError(body string) error {
 		if err := jsonUnmarshal(body, &payload); err != nil {
 			return fmt.Errorf("directadmin: %w", err)
 		}
-		return apiError(payload)
+		return mutationResult(payload)
 	}
 	vals, err := url.ParseQuery(body)
 	if err != nil {
-		return nil
+		return errUnrecognizedResponse
+	}
+	if _, ok := vals["error"]; !ok {
+		return errUnrecognizedResponse
 	}
 	if e := vals.Get("error"); e != "" && e != "0" {
 		text := vals.Get("text")
@@ -499,6 +629,35 @@ func mutationError(body string) error {
 		return &panelError{text: text}
 	}
 	return nil
+}
+
+func mutationResult(payload any) error {
+	if err := apiError(payload); err != nil {
+		return err
+	}
+	body, ok := payload.(map[string]any)
+	if !ok {
+		return errUnrecognizedResponse
+	}
+	if errVal, exists := body["error"]; exists && benignError(errVal) {
+		return nil
+	}
+	if _, ok := body["success"]; ok {
+		return nil
+	}
+	return errUnrecognizedResponse
+}
+
+func withDefaultTTL(records []Endpoint, ttl int64) []Endpoint {
+	if ttl <= 0 {
+		return records
+	}
+	for i := range records {
+		if records[i].RecordTTL <= 0 {
+			records[i].RecordTTL = ttl
+		}
+	}
+	return records
 }
 
 func (c *Client) logMutation(op, zone, recordType, dnsName, value, body string, ttl int64, err error) {

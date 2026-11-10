@@ -11,15 +11,17 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/mockshox/external-dns-webhook-directadmin/internal/directadmin"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 // Server is the port-8080 process probe. /healthz stays down until the
-// process is listening. /ready stays down until a zone list or apply succeeds,
-// and drops again when one fails. /metrics exposes process and DirectAdmin
-// API metrics.
+// process is listening. /ready stays down until a zone list succeeds, and
+// drops again when a list fails or an apply cannot reach the panel. A record
+// the panel rejects does not clear readiness. /metrics exposes process and
+// DirectAdmin API metrics.
 type Server struct {
 	log        *slog.Logger
 	http       *http.Server
@@ -97,13 +99,17 @@ func (s *Server) Finish(operation string, token uint64, err error) {
 	if operation != "list" && operation != "apply" {
 		return
 	}
+	ready := err == nil
+	if operation == "apply" && err != nil && !directadmin.PanelUnavailable(err) {
+		ready = true
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if token < s.readyToken {
 		return
 	}
 	s.readyToken = token
-	s.ready = err == nil
+	s.ready = ready
 }
 
 // SetHealthz reports whether the process should pass the liveness probe.

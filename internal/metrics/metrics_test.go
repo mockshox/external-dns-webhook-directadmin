@@ -92,6 +92,40 @@ func TestReadyFollowsZoneList(t *testing.T) {
 	}
 }
 
+func TestReadyStaysUpWhenPanelRejectsOneName(t *testing.T) {
+	panel := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("action") == "add" {
+			_, _ = io.WriteString(w, `{"error":"1","text":"cannot add"}`)
+			return
+		}
+		_, _ = io.WriteString(w, `{"A":{}}`)
+	}))
+	defer panel.Close()
+
+	probes := New(slog.New(slog.DiscardHandler), "test")
+	probes.SetHealthz(true)
+	client := directadmin.NewClient(panel.URL, "user", "secret", []string{"example.com"}, false, 60, slog.New(slog.DiscardHandler))
+	client.UseObserver(probes)
+	httpSrv := httptest.NewServer(probes.http.Handler)
+	defer httpSrv.Close()
+
+	if _, err := client.Records(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	err := client.ApplyChanges(context.Background(), directadmin.ChangeSet{Create: []directadmin.Endpoint{{
+		DNSName: "www.example.com", RecordType: "A", Targets: []string{"203.0.113.10"},
+	}}})
+	if err == nil {
+		t.Fatal("expected apply failure")
+	}
+	if got := get(t, httpSrv.URL+"/ready"); got.status != http.StatusOK {
+		t.Fatalf("ready after rejected record %d", got.status)
+	}
+	if got := get(t, httpSrv.URL+"/healthz"); got.status != http.StatusOK {
+		t.Fatalf("liveness %d", got.status)
+	}
+}
+
 func get(t *testing.T, url string) struct {
 	status int
 	body   string

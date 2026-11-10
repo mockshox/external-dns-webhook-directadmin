@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 func TestDeleteSelectorIsEncodedOnce(t *testing.T) {
@@ -316,7 +317,6 @@ func TestUnrecognizedZoneDumpIsAnError(t *testing.T) {
 	cases := []string{
 		`{"error":"0"}`,
 		`{"error":"0","success":"ok"}`,
-		`{"MX":{"@":"mail.example.com"}}`,
 		`[{"foo":"bar"}]`,
 		`{"records":[{"foo":"bar"}]}`,
 	}
@@ -325,7 +325,15 @@ func TestUnrecognizedZoneDumpIsAnError(t *testing.T) {
 			t.Fatalf("%s parsed as an empty zone", body)
 		}
 	}
-	empty := []string{`[]`, `{"records":[]}`, `{"A":{}}`, `{"dnsrecs":{}}`}
+	empty := []string{
+		`[]`,
+		`{"records":[]}`,
+		`{"A":{}}`,
+		`{"dnsrecs":{}}`,
+		`{"MX":{"@":"mail.example.com"}}`,
+		`{"records":[{"type":"MX","name":"@","value":"mail.example.com"}]}`,
+		`{"NS":{"@":"ns1.example.com"},"SOA":{"@":"ns1.example.com"}}`,
+	}
 	for _, body := range empty {
 		records, err := parseZone(body, "example.com")
 		if err != nil || len(records) != 0 {
@@ -586,6 +594,120 @@ func (s *infoSpy) Handle(_ context.Context, r slog.Record) error {
 func (s *infoSpy) WithAttrs([]slog.Attr) slog.Handler { return s }
 
 func (s *infoSpy) WithGroup(string) slog.Handler { return s }
+
+func TestOmittedTTLUsesDefault(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `{"A":{"www":"203.0.113.10","mail":{"value":"203.0.113.11","ttl":14400}}}`)
+	}))
+	defer srv.Close()
+
+	client := NewClient(srv.URL, "user", "secret", []string{"example.com"}, false, 60, nil)
+	records, err := client.Records(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]int64{}
+	for _, rec := range records {
+		if len(rec.Targets) != 1 {
+			t.Fatalf("%#v", rec)
+		}
+		got[rec.Targets[0]] = rec.RecordTTL
+	}
+	if got["203.0.113.10"] != 60 || got["203.0.113.11"] != 14400 {
+		t.Fatalf("ttl %#v", got)
+	}
+
+	unset := NewClient(srv.URL, "user", "secret", []string{"example.com"}, false, 0, nil)
+	records, err = unset.Records(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	got = map[string]int64{}
+	for _, rec := range records {
+		got[rec.Targets[0]] = rec.RecordTTL
+	}
+	if got["203.0.113.10"] != 0 || got["203.0.113.11"] != 14400 {
+		t.Fatalf("ttl with DA_TTL=0 %#v", got)
+	}
+}
+
+func TestUnrecognizedMutationBodyIsAnError(t *testing.T) {
+	bodies := []string{
+		"<html><body>login</body></html>",
+		"text=please+log+in",
+		`{"message":"please log in"}`,
+	}
+	for _, body := range bodies {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = io.WriteString(w, body)
+		}))
+		client := NewClient(srv.URL, "user", "secret", []string{"example.com"}, false, 60, nil)
+		err := client.ApplyChanges(context.Background(), ChangeSet{Create: []Endpoint{{
+			DNSName: "www.example.com", RecordType: "A", Targets: []string{"203.0.113.10"},
+		}}})
+		srv.Close()
+		if err == nil || !strings.Contains(err.Error(), "unrecognized") {
+			t.Fatalf("body %q got %v", body, err)
+		}
+	}
+}
+
+func TestRedirectIsNotFollowed(t *testing.T) {
+	followed := false
+	next := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		followed = true
+		_, _ = io.WriteString(w, `{"error":"0"}`)
+	}))
+	defer next.Close()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, next.URL+"/CMD_API_DNS_CONTROL", http.StatusFound)
+	}))
+	defer srv.Close()
+
+	client := NewClient(srv.URL, "user", "secret", []string{"example.com"}, false, 60, nil)
+	err := client.ApplyChanges(context.Background(), ChangeSet{Create: []Endpoint{{
+		DNSName: "www.example.com", RecordType: "A", Targets: []string{"203.0.113.10"},
+	}}})
+	if err == nil {
+		t.Fatal("expected redirect to fail")
+	}
+	if followed {
+		t.Fatal("redirect was followed")
+	}
+	if !PanelUnavailable(err) {
+		t.Fatal("redirect should clear readiness")
+	}
+}
+
+func TestRetryAfterIsHonored(t *testing.T) {
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if calls == 1 {
+			w.Header().Set("Retry-After", "10")
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		_, _ = io.WriteString(w, `{"A":{}}`)
+	}))
+	defer srv.Close()
+
+	client := NewClient(srv.URL, "user", "secret", []string{"example.com"}, false, 60, nil)
+	var waited time.Duration
+	client.sleep = func(ctx context.Context, d time.Duration) error {
+		waited = d
+		return nil
+	}
+	if _, err := client.Records(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 2 {
+		t.Fatalf("calls %d", calls)
+	}
+	if waited < 10*time.Second || waited > maxRetryWait {
+		t.Fatalf("waited %s", waited)
+	}
+}
 
 func (s *infoSpy) keys() []string {
 	s.mu.Lock()

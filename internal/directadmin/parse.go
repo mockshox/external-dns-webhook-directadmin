@@ -50,6 +50,8 @@ func parseZone(body, zone string) ([]Endpoint, error) {
 			ep = &Endpoint{DNSName: name, RecordType: rec.Type, RecordTTL: rec.TTL}
 			grouped[key] = ep
 			order = append(order, key)
+		} else if ep.RecordTTL == 0 && rec.TTL > 0 {
+			ep.RecordTTL = rec.TTL
 		}
 		if !contains(ep.Targets, value) {
 			ep.Targets = append(ep.Targets, value)
@@ -93,12 +95,14 @@ func iterRecords(payload any) ([]rawRecord, error) {
 	}
 }
 
-// iterArray accepts an empty list as an empty zone. A non-empty list whose
-// elements have neither a type nor a value is not a zone dump.
+// iterArray accepts an empty list as an empty zone. A list that only contains
+// unsupported types is an empty managed set. A non-empty list whose elements
+// have neither a type nor a value is not a zone dump.
 func iterArray(items []any) ([]rawRecord, error) {
 	if len(items) == 0 {
 		return nil, nil
 	}
+	sawRecord := false
 	var out []rawRecord
 	for _, item := range items {
 		m, ok := item.(map[string]any)
@@ -112,9 +116,14 @@ func iterArray(items []any) ([]rawRecord, error) {
 		if rtype == nil || m["value"] == nil {
 			continue
 		}
-		out = append(out, rawRecord{asString(rtype), asString(m["name"]), asString(m["value"]), ttlOf(m)})
+		sawRecord = true
+		rec := rawRecord{asString(rtype), asString(m["name"]), asString(m["value"]), ttlOf(m)}
+		if !supported(strings.ToUpper(rec.Type)) {
+			continue
+		}
+		out = append(out, rec)
 	}
-	if len(out) == 0 {
+	if !sawRecord {
 		return nil, errUnrecognized
 	}
 	return out, nil
@@ -135,14 +144,7 @@ func iterDNSRecs(dnsrecs map[string]any) []rawRecord {
 			}
 		case map[string]any:
 			for name, value := range typed {
-				switch many := value.(type) {
-				case []any:
-					for _, v := range many {
-						out = append(out, rawRecord{rtype, name, asString(v), 0})
-					}
-				default:
-					out = append(out, rawRecord{rtype, name, asString(value), 0})
-				}
+				out = appendValue(out, rtype, name, value)
 			}
 		}
 	}
@@ -163,16 +165,30 @@ func iterTypedMaps(body map[string]any) []rawRecord {
 			}
 		case map[string]any:
 			for name, value := range items {
-				switch many := value.(type) {
-				case []any:
-					for _, v := range many {
-						out = append(out, rawRecord{rtype, name, asString(v), 0})
-					}
-				default:
-					out = append(out, rawRecord{rtype, name, asString(value), 0})
-				}
+				out = appendValue(out, rtype, name, value)
 			}
 		}
+	}
+	return out
+}
+
+// appendValue reads one map entry. A string has no TTL. An object may carry
+// value and ttl. A list holds either.
+func appendValue(out []rawRecord, rtype, name string, value any) []rawRecord {
+	switch typed := value.(type) {
+	case []any:
+		for _, item := range typed {
+			out = appendValue(out, rtype, name, item)
+		}
+		return out
+	case map[string]any:
+		if _, ok := typed["value"]; !ok {
+			return out
+		}
+		out = append(out, rawRecord{rtype, name, asString(typed["value"]), ttlOf(typed)})
+	case nil:
+	default:
+		out = append(out, rawRecord{rtype, name, asString(typed), 0})
 	}
 	return out
 }
@@ -218,7 +234,10 @@ func apiError(payload any) error {
 }
 
 func hasTypedKeys(body map[string]any) bool {
-	for _, rtype := range []string{"A", "AAAA", "CNAME", "TXT"} {
+	for _, rtype := range []string{
+		"A", "AAAA", "CNAME", "TXT", "MX", "NS", "SOA", "SRV", "CAA",
+		"PTR", "TLSA", "DS", "SSHFP", "NAPTR", "SPF",
+	} {
 		if _, ok := body[rtype]; ok {
 			return true
 		}

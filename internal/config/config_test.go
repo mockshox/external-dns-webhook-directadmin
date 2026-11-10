@@ -77,6 +77,34 @@ func TestLoadTTL(t *testing.T) {
 	}
 }
 
+func TestLoadRejectsCleartextAndCredentials(t *testing.T) {
+	env := map[string]string{
+		"DA_URL":       "http://panel.example:2222",
+		"DA_USERNAME":  "user",
+		"DA_LOGIN_KEY": "key",
+		"DA_DOMAIN":    "example.com",
+	}
+	if _, err := Load(func(k string) string { return env[k] }); err == nil {
+		t.Fatal("expected cleartext DA_URL to fail")
+	}
+	env["DA_ALLOW_HTTP"] = "true"
+	cfg, err := Load(func(k string) string { return env[k] })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.URL != "http://panel.example:2222" {
+		t.Fatalf("url %q", cfg.URL)
+	}
+	env["DA_URL"] = "https://user:secret@panel.example:2222"
+	if _, err := Load(func(k string) string { return env[k] }); err == nil {
+		t.Fatal("expected credentials in DA_URL to fail")
+	}
+	env["DA_URL"] = "https://panel.example:2222/CMD_API_DNS_CONTROL"
+	if _, err := Load(func(k string) string { return env[k] }); err == nil {
+		t.Fatal("expected a path in DA_URL to fail")
+	}
+}
+
 func TestLoadDomainFallbackAndFilter(t *testing.T) {
 	env := map[string]string{
 		"DA_URL":        "https://panel.example:2222",

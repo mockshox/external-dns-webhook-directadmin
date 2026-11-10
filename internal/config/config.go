@@ -4,6 +4,7 @@ package config
 import (
 	"fmt"
 	"log/slog"
+	"net/url"
 	"strconv"
 	"strings"
 )
@@ -28,8 +29,12 @@ type Config struct {
 
 // Load reads configuration from getenv, which is usually os.Getenv.
 func Load(getenv func(string) string) (Config, error) {
+	panelURL, err := normalizeURL(getenv("DA_URL"), truthy(getenv("DA_ALLOW_HTTP")))
+	if err != nil {
+		return Config{}, err
+	}
 	cfg := Config{
-		URL:            strings.TrimRight(strings.TrimSpace(getenv("DA_URL")), "/"),
+		URL:            panelURL,
 		Username:       getenv("DA_USERNAME"),
 		LoginKey:       getenv("DA_LOGIN_KEY"),
 		Insecure:       truthy(getenv("DA_INSECURE")),
@@ -132,6 +137,34 @@ func valueOr(value, fallback string) string {
 		return fallback
 	}
 	return strings.TrimSpace(value)
+}
+
+func normalizeURL(raw string, allowHTTP bool) (string, error) {
+	raw = strings.TrimRight(strings.TrimSpace(raw), "/")
+	if raw == "" {
+		return "", nil
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" || u.Scheme == "" {
+		return "", fmt.Errorf("DA_URL must be an absolute https origin")
+	}
+	if u.User != nil {
+		return "", fmt.Errorf("DA_URL must not include credentials")
+	}
+	if u.RawQuery != "" || u.Fragment != "" || (u.Path != "" && u.Path != "/") {
+		return "", fmt.Errorf("DA_URL must be the panel origin with no path")
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "https":
+		return raw, nil
+	case "http":
+		if allowHTTP {
+			return raw, nil
+		}
+		return "", fmt.Errorf("DA_URL must use https (set DA_ALLOW_HTTP=true to permit cleartext)")
+	default:
+		return "", fmt.Errorf("DA_URL must use https")
+	}
 }
 
 func truthy(value string) bool {
