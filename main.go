@@ -17,20 +17,25 @@ import (
 	"github.com/mockshox/external-dns-webhook-directadmin/internal/server"
 )
 
+// version is set with -ldflags "-X main.version=...".
+var version = "dev"
+
 func main() {
-	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	bootstrap := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	cfg, err := config.Load(os.Getenv)
 	if err != nil {
-		logger.Error("configuration", "err", err)
+		bootstrap.Error("configuration", "err", err)
 		os.Exit(1)
 	}
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: cfg.LogLevel}))
 	client := directadmin.NewClient(cfg.URL, cfg.Username, cfg.LoginKey, cfg.Zones, cfg.Insecure, cfg.TTL, logger)
+	probes := metrics.New(logger, version)
+	client.UseObserver(probes)
 
 	webhook := &http.Server{
 		Handler:           server.New(client, logger),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
-	probes := metrics.New(logger)
 
 	metricsLn, err := net.Listen("tcp", cfg.MetricsAddress)
 	if err != nil {
@@ -43,7 +48,6 @@ func main() {
 		os.Exit(1)
 	}
 	probes.SetHealthz(true)
-	probes.SetReady(true)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -51,7 +55,8 @@ func main() {
 	errCh := make(chan error, 2)
 	go func() { errCh <- probes.Serve(metricsLn) }()
 	go func() { errCh <- webhook.Serve(webhookLn) }()
-	logger.Info("listening", "webhook", cfg.WebhookAddress, "metrics", cfg.MetricsAddress, "zones", cfg.Zones)
+	go watchPanel(ctx, client, logger)
+	logger.Info("listening", "version", version, "webhook", cfg.WebhookAddress, "metrics", cfg.MetricsAddress, "zones", cfg.Zones)
 
 	select {
 	case <-ctx.Done():
@@ -70,4 +75,26 @@ func main() {
 	defer cancel()
 	_ = webhook.Shutdown(shutdown)
 	_ = probes.Shutdown(shutdown)
+}
+
+// watchPanel lists the zones once, retrying until the panel answers, then
+// stops. Later list and apply calls keep readiness current.
+func watchPanel(ctx context.Context, client *directadmin.Client, logger *slog.Logger) {
+	backoff := time.Second
+	for {
+		_, err := client.Records(ctx)
+		if err == nil {
+			logger.Info("directadmin zone list succeeded")
+			return
+		}
+		logger.Error("directadmin zone list", "err", err)
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(backoff):
+		}
+		if backoff < 30*time.Second {
+			backoff *= 2
+		}
+	}
 }

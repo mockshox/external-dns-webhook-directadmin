@@ -3,6 +3,7 @@ package config
 
 import (
 	"fmt"
+	"log/slog"
 	"strconv"
 	"strings"
 )
@@ -20,6 +21,7 @@ type Config struct {
 	Zones          []string
 	Insecure       bool
 	TTL            int64
+	LogLevel       slog.Level
 	WebhookAddress string
 	MetricsAddress string
 }
@@ -48,6 +50,7 @@ func Load(getenv func(string) string) (Config, error) {
 		return Config{}, err
 	}
 	cfg.TTL = ttl
+	cfg.LogLevel = logLevel(getenv("LOG_LEVEL"))
 
 	var missing []string
 	if cfg.URL == "" {
@@ -91,7 +94,7 @@ func restrictZones(zones, filter []string) ([]string, error) {
 func splitList(raw string) []string {
 	var out []string
 	for _, part := range strings.Split(raw, ",") {
-		part = strings.TrimSpace(strings.TrimSuffix(part, "."))
+		part = strings.ToLower(strings.TrimSpace(strings.TrimSuffix(part, ".")))
 		if part != "" {
 			out = append(out, part)
 		}
@@ -109,6 +112,19 @@ func ttlSeconds(raw string) (int64, error) {
 		return 0, fmt.Errorf("DA_TTL must be a non-negative number of seconds")
 	}
 	return n, nil
+}
+
+func logLevel(raw string) slog.Level {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "debug":
+		return slog.LevelDebug
+	case "warn", "warning":
+		return slog.LevelWarn
+	case "error":
+		return slog.LevelError
+	default:
+		return slog.LevelInfo
+	}
 }
 
 func valueOr(value, fallback string) string {

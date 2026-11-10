@@ -3,9 +3,12 @@ package directadmin
 import (
 	"context"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -177,6 +180,11 @@ func TestApexCreateListAndDelete(t *testing.T) {
 
 	err = client.ApplyChanges(context.Background(), ChangeSet{
 		Create: []Endpoint{{DNSName: "example.com", RecordType: "A", Targets: []string{"203.0.113.10"}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = client.ApplyChanges(context.Background(), ChangeSet{
 		Delete: []Endpoint{{DNSName: "example.com", RecordType: "A", Targets: []string{"203.0.113.10"}}},
 	})
 	if err != nil {
@@ -302,4 +310,285 @@ func TestParseZoneKeepsRecordTTL(t *testing.T) {
 	if len(records) != 2 || records[0].RecordTTL != 14400 || records[1].RecordTTL != 60 {
 		t.Fatalf("%#v", records)
 	}
+}
+
+func TestUnrecognizedZoneDumpIsAnError(t *testing.T) {
+	cases := []string{
+		`{"error":"0"}`,
+		`{"error":"0","success":"ok"}`,
+		`{"MX":{"@":"mail.example.com"}}`,
+		`[{"foo":"bar"}]`,
+		`{"records":[{"foo":"bar"}]}`,
+	}
+	for _, body := range cases {
+		if _, err := parseZone(body, "example.com"); err == nil {
+			t.Fatalf("%s parsed as an empty zone", body)
+		}
+	}
+	empty := []string{`[]`, `{"records":[]}`, `{"A":{}}`, `{"dnsrecs":{}}`}
+	for _, body := range empty {
+		records, err := parseZone(body, "example.com")
+		if err != nil || len(records) != 0 {
+			t.Fatalf("%s -> %#v %v", body, records, err)
+		}
+	}
+}
+
+func TestTXTAndAAAARoundTrip(t *testing.T) {
+	records, err := parseZone(`{"TXT":{"www":"\"heritage=external-dns,external-dns/owner=mbono-public\""},"AAAA":{"www":"2001:0db8:0000:0000:0000:0000:0000:0001"}}`, "example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundTXT := false
+	foundAAAA := false
+	for _, rec := range records {
+		if rec.RecordType == "TXT" && len(rec.Targets) == 1 && rec.Targets[0] == "heritage=external-dns,external-dns/owner=mbono-public" {
+			foundTXT = true
+		}
+		if rec.RecordType == "AAAA" && len(rec.Targets) == 1 && rec.Targets[0] == "2001:db8::1" {
+			foundAAAA = true
+		}
+	}
+	if !foundTXT || !foundAAAA {
+		t.Fatalf("%#v", records)
+	}
+
+	spaced, err := parseZone(`{"TXT":{"www":"\"v=spf1 a mx\""}}`, "example.com")
+	if err != nil || len(spaced) != 1 || spaced[0].Targets[0] != "v=spf1 a mx" {
+		t.Fatalf("%#v %v", spaced, err)
+	}
+}
+
+func TestSameTargetEditsTTL(t *testing.T) {
+	var raw string
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		raw = r.URL.RawQuery
+		_, _ = io.WriteString(w, `{"error":"0"}`)
+	}))
+	defer srv.Close()
+	client := NewClient(srv.URL, "user", "secret", []string{"example.com"}, false, 60, nil)
+	err := client.ApplyChanges(context.Background(), ChangeSet{
+		Delete: []Endpoint{{DNSName: "www.example.com", RecordType: "A", Targets: []string{"203.0.113.10"}, RecordTTL: 14400}},
+		Create: []Endpoint{{DNSName: "www.example.com", RecordType: "A", Targets: []string{"203.0.113.10"}, RecordTTL: 60}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 {
+		t.Fatalf("calls %d", calls)
+	}
+	query, err := url.ParseQuery(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if query.Get("action") != "edit" || query.Get("ttl") != "60" || query.Get("name") != "www" || query.Get("value") != "203.0.113.10" {
+		t.Fatalf("edit query %#v", query)
+	}
+	if query.Get("arecs0") != "name=www&value=203.0.113.10" {
+		t.Fatalf("selector %q raw %s", query.Get("arecs0"), raw)
+	}
+	if strings.Contains(raw, "%253D") {
+		t.Fatalf("selector encoded twice: %s", raw)
+	}
+
+	calls = 0
+	err = client.ApplyChanges(context.Background(), ChangeSet{
+		Delete: []Endpoint{{DNSName: "www.example.com", RecordType: "A", Targets: []string{"203.0.113.10"}, RecordTTL: 60}},
+		Create: []Endpoint{{DNSName: "www.example.com", RecordType: "A", Targets: []string{"203.0.113.10"}, RecordTTL: 60}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 0 {
+		t.Fatalf("unchanged ttl was written %d times", calls)
+	}
+
+	unset := NewClient(srv.URL, "user", "secret", []string{"example.com"}, false, 0, nil)
+	err = unset.ApplyChanges(context.Background(), ChangeSet{
+		Delete: []Endpoint{{DNSName: "www.example.com", RecordType: "A", Targets: []string{"203.0.113.10"}}},
+		Create: []Endpoint{{DNSName: "www.example.com", RecordType: "A", Targets: []string{"203.0.113.10"}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 0 {
+		t.Fatalf("edit with no ttl was sent %d times", calls)
+	}
+}
+
+func TestEditFallsBackToReplace(t *testing.T) {
+	var actions []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		action := r.URL.Query().Get("action")
+		actions = append(actions, action)
+		if action == "edit" {
+			_, _ = io.WriteString(w, `{"error":"1","text":"unknown action"}`)
+			return
+		}
+		_, _ = io.WriteString(w, `{"error":"0"}`)
+	}))
+	defer srv.Close()
+	client := NewClient(srv.URL, "user", "secret", []string{"example.com"}, false, 60, nil)
+	err := client.ApplyChanges(context.Background(), ChangeSet{
+		Delete: []Endpoint{{DNSName: "www.example.com", RecordType: "A", Targets: []string{"203.0.113.10"}, RecordTTL: 14400}},
+		Create: []Endpoint{{DNSName: "www.example.com", RecordType: "A", Targets: []string{"203.0.113.10"}, RecordTTL: 60}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(actions, ",") != "edit,select,add" {
+		t.Fatalf("actions %v", actions)
+	}
+}
+
+func TestIdempotentAddAndDelete(t *testing.T) {
+	phrases := []struct{ op, text string }{
+		{"add", "Cannot Add Record - It Already Exists"},
+		{"add", "duplicate"},
+		{"delete", "It Does Not Exist"},
+		{"delete", "doesn't exist"},
+		{"delete", "no such record"},
+		{"delete", "not found"},
+		{"delete", "unable to find"},
+	}
+	for _, tc := range phrases {
+		err := ignoreIdempotent(tc.op, &panelError{text: tc.text})
+		if err != nil {
+			t.Fatalf("%s %q: %v", tc.op, tc.text, err)
+		}
+	}
+	if err := ignoreIdempotent("add", &panelError{text: "cannot add"}); err == nil {
+		t.Fatal("real add failure was ignored")
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("action") == "add" {
+			_, _ = io.WriteString(w, `{"error":"1","text":"Cannot Add Record - It Already Exists"}`)
+			return
+		}
+		_, _ = io.WriteString(w, `{"error":"1","text":"Cannot Delete Record - It Does Not Exist"}`)
+	}))
+	defer srv.Close()
+	client := NewClient(srv.URL, "user", "secret", []string{"example.com"}, false, 60, nil)
+	err := client.ApplyChanges(context.Background(), ChangeSet{
+		Create: []Endpoint{{DNSName: "www.example.com", RecordType: "A", Targets: []string{"203.0.113.10"}}},
+		Delete: []Endpoint{{DNSName: "gone.example.com", RecordType: "A", Targets: []string{"203.0.113.11"}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRetryTransientAndContinueNames(t *testing.T) {
+	var lists int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		lists++
+		if lists == 1 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		_, _ = io.WriteString(w, `{"A":{}}`)
+	}))
+	defer srv.Close()
+	client := NewClient(srv.URL, "user", "secret", []string{"example.com"}, false, 60, nil)
+	if _, err := client.Records(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if lists != 2 {
+		t.Fatalf("list attempts %d", lists)
+	}
+
+	var names []string
+	panel := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		name := r.URL.Query().Get("name")
+		names = append(names, name)
+		if name == "bad" {
+			_, _ = io.WriteString(w, `{"error":"1","text":"cannot add"}`)
+			return
+		}
+		_, _ = io.WriteString(w, `{"error":"0"}`)
+	}))
+	defer panel.Close()
+	client = NewClient(panel.URL, "user", "secret", []string{"example.com"}, false, 60, nil)
+	err := client.ApplyChanges(context.Background(), ChangeSet{Create: []Endpoint{
+		{DNSName: "bad.example.com", RecordType: "A", Targets: []string{"203.0.113.1"}},
+		{DNSName: "good.example.com", RecordType: "A", Targets: []string{"203.0.113.2"}},
+	}})
+	if err == nil || !strings.Contains(err.Error(), "cannot add") {
+		t.Fatalf("got %v", err)
+	}
+	if strings.Join(names, ",") != "bad,good" {
+		t.Fatalf("names %v", names)
+	}
+}
+
+func TestWildcardAAAAAndZoneCase(t *testing.T) {
+	var query url.Values
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		query = r.URL.Query()
+		_, _ = io.WriteString(w, `{"error":"0"}`)
+	}))
+	defer srv.Close()
+	client := NewClient(srv.URL, "user", "secret", []string{"Example.com"}, false, 60, nil)
+	err := client.ApplyChanges(context.Background(), ChangeSet{Create: []Endpoint{{
+		DNSName: "*.example.com", RecordType: "AAAA", Targets: []string{"2001:0db8::1"},
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if query.Get("domain") != "example.com" || query.Get("name") != "*" || query.Get("value") != "2001:db8::1" {
+		t.Fatalf("query %#v", query)
+	}
+}
+
+func TestInfoLogsOmitRecordValues(t *testing.T) {
+	spy := &infoSpy{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `{"error":"0"}`)
+	}))
+	defer srv.Close()
+	client := NewClient(srv.URL, "user", "secret", []string{"example.com"}, false, 60, slog.New(spy))
+	err := client.ApplyChanges(context.Background(), ChangeSet{Create: []Endpoint{{
+		DNSName: "www.example.com", RecordType: "TXT", Targets: []string{"heritage=external-dns,external-dns/owner=mbono-public"},
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range spy.keys() {
+		if key == "value" || key == "body" {
+			t.Fatalf("info log included %s", key)
+		}
+	}
+}
+
+type infoSpy struct {
+	mu   sync.Mutex
+	seen []string
+}
+
+func (s *infoSpy) Enabled(context.Context, slog.Level) bool { return true }
+
+func (s *infoSpy) Handle(_ context.Context, r slog.Record) error {
+	if r.Level != slog.LevelInfo {
+		return nil
+	}
+	r.Attrs(func(a slog.Attr) bool {
+		s.mu.Lock()
+		s.seen = append(s.seen, a.Key)
+		s.mu.Unlock()
+		return true
+	})
+	return nil
+}
+
+func (s *infoSpy) WithAttrs([]slog.Attr) slog.Handler { return s }
+
+func (s *infoSpy) WithGroup(string) slog.Handler { return s }
+
+func (s *infoSpy) keys() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.seen...)
 }

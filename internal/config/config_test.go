@@ -1,6 +1,9 @@
 package config
 
-import "testing"
+import (
+	"log/slog"
+	"testing"
+)
 
 func TestLoadZonesAndDefaults(t *testing.T) {
 	env := map[string]string{
@@ -27,6 +30,29 @@ func TestLoadZonesAndDefaults(t *testing.T) {
 	}
 	if cfg.TTL != 60 {
 		t.Fatalf("default ttl %d", cfg.TTL)
+	}
+	if cfg.LogLevel != slog.LevelInfo {
+		t.Fatalf("log level %v", cfg.LogLevel)
+	}
+}
+
+func TestLoadLowercasesZonesAndLogLevel(t *testing.T) {
+	env := map[string]string{
+		"DA_URL":       "https://panel.example:2222",
+		"DA_USERNAME":  "user",
+		"DA_LOGIN_KEY": "key",
+		"DA_DOMAINS":   "Example.COM",
+		"LOG_LEVEL":    "debug",
+	}
+	cfg, err := Load(func(k string) string { return env[k] })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Zones) != 1 || cfg.Zones[0] != "example.com" {
+		t.Fatalf("zones %#v", cfg.Zones)
+	}
+	if cfg.LogLevel != slog.LevelDebug {
+		t.Fatalf("log level %v", cfg.LogLevel)
 	}
 }
 

@@ -63,6 +63,26 @@ func TestAdjustEchoesAndApplyReturns204(t *testing.T) {
 	}
 }
 
+func TestPanelFailureIsBadGateway(t *testing.T) {
+	panel := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `{"error":"0"}`)
+	}))
+	defer panel.Close()
+	client := directadmin.NewClient(panel.URL, "user", "secret", []string{"example.com"}, false, 60, slog.New(slog.DiscardHandler))
+	srv := httptest.NewServer(New(client, slog.New(slog.DiscardHandler)))
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/records")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusBadGateway || !strings.Contains(string(body), "no recognized records") {
+		t.Fatalf("status %d body %s", resp.StatusCode, body)
+	}
+}
+
 type response struct {
 	status      int
 	body        string

@@ -2,6 +2,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -93,7 +94,14 @@ func (h *handler) adjust(w http.ResponseWriter, r *http.Request) {
 
 func (h *handler) fail(w http.ResponseWriter, what string, err error) {
 	h.log.Error(what, "err", err)
-	http.Error(w, what, http.StatusInternalServerError)
+	http.Error(w, what+": "+err.Error(), statusForPanel(err))
+}
+
+func statusForPanel(err error) int {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return http.StatusGatewayTimeout
+	}
+	return http.StatusBadGateway
 }
 
 func readBody(r *http.Request) ([]byte, error) {

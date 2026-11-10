@@ -2,10 +2,15 @@ package directadmin
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
 )
+
+// errUnrecognized means the payload is JSON but not a zone dump we know.
+// Returning records from it would look like an empty zone.
+var errUnrecognized = errors.New("directadmin zone dump has no recognized records")
 
 func parseZone(body, zone string) ([]Endpoint, error) {
 	body = strings.TrimSpace(body)
@@ -23,9 +28,13 @@ func parseZone(body, zone string) ([]Endpoint, error) {
 		return nil, err
 	}
 
+	recs, err := iterRecords(payload)
+	if err != nil {
+		return nil, fmt.Errorf("directadmin zone %s: %w", zone, err)
+	}
 	grouped := map[string]*Endpoint{}
 	var order []string
-	for _, rec := range iterRecords(payload) {
+	for _, rec := range recs {
 		rec.Type = strings.ToUpper(rec.Type)
 		if !supported(rec.Type) {
 			continue
@@ -60,44 +69,55 @@ type rawRecord struct {
 	TTL   int64
 }
 
-func iterRecords(payload any) []rawRecord {
+func iterRecords(payload any) ([]rawRecord, error) {
 	switch body := payload.(type) {
 	case []any:
-		var out []rawRecord
-		for _, item := range body {
-			m, ok := item.(map[string]any)
-			if !ok || m["type"] == nil || m["value"] == nil {
-				continue
-			}
-			out = append(out, rawRecord{asString(m["type"]), asString(m["name"]), asString(m["value"]), ttlOf(m)})
-		}
-		return out
+		return iterArray(body)
 	case map[string]any:
-		if err := apiError(body); err != nil && !hasRecords(body) {
-			return nil
-		}
-		if records, ok := body["records"].([]any); ok {
-			var out []rawRecord
-			for _, item := range records {
-				m, ok := item.(map[string]any)
-				if !ok || m["value"] == nil {
-					continue
-				}
-				rtype := m["type"]
-				if rtype == nil {
-					rtype = m["recordType"]
-				}
-				out = append(out, rawRecord{asString(rtype), asString(m["name"]), asString(m["value"]), ttlOf(m)})
+		if raw, ok := body["records"]; ok {
+			items, ok := raw.([]any)
+			if !ok {
+				return nil, errUnrecognized
 			}
-			return out
+			return iterArray(items)
 		}
 		if dnsrecs := dnsRecs(body); dnsrecs != nil {
-			return iterDNSRecs(dnsrecs)
+			return iterDNSRecs(dnsrecs), nil
 		}
-		return iterTypedMaps(body)
+		if hasTypedKeys(body) {
+			return iterTypedMaps(body), nil
+		}
+		return nil, errUnrecognized
 	default:
-		return nil
+		return nil, errUnrecognized
 	}
+}
+
+// iterArray accepts an empty list as an empty zone. A non-empty list whose
+// elements have neither a type nor a value is not a zone dump.
+func iterArray(items []any) ([]rawRecord, error) {
+	if len(items) == 0 {
+		return nil, nil
+	}
+	var out []rawRecord
+	for _, item := range items {
+		m, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		rtype := m["type"]
+		if rtype == nil {
+			rtype = m["recordType"]
+		}
+		if rtype == nil || m["value"] == nil {
+			continue
+		}
+		out = append(out, rawRecord{asString(rtype), asString(m["name"]), asString(m["value"]), ttlOf(m)})
+	}
+	if len(out) == 0 {
+		return nil, errUnrecognized
+	}
+	return out, nil
 }
 
 func iterDNSRecs(dnsrecs map[string]any) []rawRecord {
@@ -194,7 +214,16 @@ func apiError(payload any) error {
 	if msg == nil {
 		msg = payload
 	}
-	return fmt.Errorf("directadmin: %v", msg)
+	return &panelError{text: fmt.Sprint(msg)}
+}
+
+func hasTypedKeys(body map[string]any) bool {
+	for _, rtype := range []string{"A", "AAAA", "CNAME", "TXT"} {
+		if _, ok := body[rtype]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 func benignError(value any) bool {

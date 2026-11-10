@@ -2,6 +2,7 @@ package directadmin
 
 import (
 	"fmt"
+	"net/netip"
 	"strings"
 )
 
@@ -42,7 +43,7 @@ func matchZone(name string, zones []string) (string, bool) {
 		z := strings.TrimSuffix(strings.ToLower(zone), ".")
 		if name == z || strings.HasSuffix(name, "."+z) {
 			if len(z) > len(best) {
-				best = zone
+				best = z
 			}
 		}
 	}
@@ -63,24 +64,34 @@ func fqdn(name, zone string) string {
 	return strings.ToLower(out)
 }
 
-// canonicalTarget makes a CNAME value absolute when it already contains a dot.
-// DirectAdmin treats a CNAME without a trailing dot as relative to the zone, so
-// "foo.other.com" would be stored as foo.other.com.<zone>. A single label is
-// left unchanged.
+// canonicalTarget normalizes a value before it is compared or written.
+// CNAME targets that already contain a dot become absolute: DirectAdmin treats
+// a CNAME without a trailing dot as relative to the zone, so "foo.other.com"
+// would be stored as foo.other.com.<zone>. A single label is left unchanged.
+// AAAA targets use the compressed textual form so the list and the plan match.
 func canonicalTarget(recordType, value string) string {
-	if !strings.EqualFold(recordType, "CNAME") {
-		return value
-	}
 	value = strings.TrimSpace(value)
-	if value == "" || strings.HasSuffix(value, ".") || !strings.Contains(value, ".") {
+	switch strings.ToUpper(recordType) {
+	case "AAAA":
+		addr, err := netip.ParseAddr(value)
+		if err != nil {
+			return value
+		}
+		return addr.String()
+	case "CNAME":
+		if value == "" || strings.HasSuffix(value, ".") || !strings.Contains(value, ".") {
+			return value
+		}
+		return value + "."
+	default:
 		return value
 	}
-	return value + "."
 }
 
 func relative(dnsName, zone string) string {
-	name := strings.TrimSuffix(dnsName, ".")
-	if name == zone {
+	name := strings.TrimSuffix(strings.ToLower(dnsName), ".")
+	zone = strings.TrimSuffix(strings.ToLower(zone), ".")
+	if name == zone || name == "@" {
 		return "@"
 	}
 	suffix := "." + zone
