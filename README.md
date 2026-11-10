@@ -8,6 +8,11 @@ The webhook is deployed by the [ExternalDNS Helm chart](https://kubernetes-sigs.
 
 Images are published for `linux/amd64` and `linux/arm64` at `ghcr.io/mockshox/external-dns-webhook-directadmin`.
 
+## Motivation
+I built this to automate DNS management for my Kubernetes workloads without moving my DNS away from cyber_Folks. ExternalDNS handles the Kubernetes side, and this webhook bridges it to DirectAdmin, so I don’t have to create and delete records manually.
+
+It uses the DirectAdmin API rather than anything specific to cyber_Folks, so it should also be useful for people using other providers running the same panel.
+
 ## Quick start
 
 1. In DirectAdmin, create a login key that allows only the command `CMD_API_DNS_CONTROL`.
