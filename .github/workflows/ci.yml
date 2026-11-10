@@ -62,11 +62,24 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
       - name: Make the package public
-        continue-on-error: true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OWNER: ${{ github.repository_owner }}
+          PACKAGE: ${{ github.event.repository.name }}
         run: |
-          gh api --method PATCH \
+          # /user/packages is the token's own user. GITHUB_TOKEN is the
+          # Actions bot, so that route is 404. The package belongs to the
+          # repository owner.
+          kind=$(gh api "/users/${OWNER}" --jq .type)
+          if [ "${kind}" = "Organization" ]; then
+            path="/orgs/${OWNER}/packages/container/${PACKAGE}"
+          else
+            path="/users/${OWNER}/packages/container/${PACKAGE}"
+          fi
+          if gh api --method PATCH \
             -H "Accept: application/vnd.github+json" \
-            "/user/packages/container/external-dns-webhook-directadmin" \
-            -f visibility=public
+            "${path}" \
+            -f visibility=public; then
+            exit 0
+          fi
+          echo "::warning::Could not mark ${OWNER}/${PACKAGE} public. Set the package visibility to public once in GitHub."
