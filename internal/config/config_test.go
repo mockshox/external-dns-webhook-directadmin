@@ -1,0 +1,127 @@
+package config
+
+import (
+	"log/slog"
+	"testing"
+)
+
+func TestLoadZonesAndDefaults(t *testing.T) {
+	env := map[string]string{
+		"DA_URL":       "https://panel.example:2222/",
+		"DA_USERNAME":  "user",
+		"DA_LOGIN_KEY": "key",
+		"DA_DOMAINS":   "example.com, example.org.",
+	}
+	cfg, err := Load(func(k string) string { return env[k] })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.URL != "https://panel.example:2222" {
+		t.Fatalf("url %q", cfg.URL)
+	}
+	if cfg.Insecure {
+		t.Fatal("TLS verification is on unless DA_INSECURE is set")
+	}
+	if cfg.WebhookAddress != "127.0.0.1:8888" || cfg.MetricsAddress != ":8080" {
+		t.Fatalf("addresses webhook=%s metrics=%s", cfg.WebhookAddress, cfg.MetricsAddress)
+	}
+	if len(cfg.Zones) != 2 || cfg.Zones[0] != "example.com" || cfg.Zones[1] != "example.org" {
+		t.Fatalf("zones %#v", cfg.Zones)
+	}
+	if cfg.TTL != 60 {
+		t.Fatalf("default ttl %d", cfg.TTL)
+	}
+	if cfg.LogLevel != slog.LevelInfo {
+		t.Fatalf("log level %v", cfg.LogLevel)
+	}
+}
+
+func TestLoadLowercasesZonesAndLogLevel(t *testing.T) {
+	env := map[string]string{
+		"DA_URL":       "https://panel.example:2222",
+		"DA_USERNAME":  "user",
+		"DA_LOGIN_KEY": "key",
+		"DA_DOMAINS":   "Example.COM",
+		"LOG_LEVEL":    "debug",
+	}
+	cfg, err := Load(func(k string) string { return env[k] })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Zones) != 1 || cfg.Zones[0] != "example.com" {
+		t.Fatalf("zones %#v", cfg.Zones)
+	}
+	if cfg.LogLevel != slog.LevelDebug {
+		t.Fatalf("log level %v", cfg.LogLevel)
+	}
+}
+
+func TestLoadTTL(t *testing.T) {
+	env := map[string]string{
+		"DA_URL":       "https://panel.example:2222",
+		"DA_USERNAME":  "user",
+		"DA_LOGIN_KEY": "key",
+		"DA_DOMAIN":    "example.com",
+		"DA_TTL":       "120",
+	}
+	cfg, err := Load(func(k string) string { return env[k] })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.TTL != 120 {
+		t.Fatalf("ttl %d", cfg.TTL)
+	}
+	env["DA_TTL"] = "nope"
+	if _, err := Load(func(k string) string { return env[k] }); err == nil {
+		t.Fatal("expected invalid DA_TTL")
+	}
+}
+
+func TestLoadRejectsCleartextAndCredentials(t *testing.T) {
+	env := map[string]string{
+		"DA_URL":       "http://panel.example:2222",
+		"DA_USERNAME":  "user",
+		"DA_LOGIN_KEY": "key",
+		"DA_DOMAIN":    "example.com",
+	}
+	if _, err := Load(func(k string) string { return env[k] }); err == nil {
+		t.Fatal("expected cleartext DA_URL to fail")
+	}
+	env["DA_ALLOW_HTTP"] = "true"
+	cfg, err := Load(func(k string) string { return env[k] })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.URL != "http://panel.example:2222" {
+		t.Fatalf("url %q", cfg.URL)
+	}
+	env["DA_URL"] = "https://user:secret@panel.example:2222"
+	if _, err := Load(func(k string) string { return env[k] }); err == nil {
+		t.Fatal("expected credentials in DA_URL to fail")
+	}
+	env["DA_URL"] = "https://panel.example:2222/CMD_API_DNS_CONTROL"
+	if _, err := Load(func(k string) string { return env[k] }); err == nil {
+		t.Fatal("expected a path in DA_URL to fail")
+	}
+}
+
+func TestLoadDomainFallbackAndFilter(t *testing.T) {
+	env := map[string]string{
+		"DA_URL":        "https://panel.example:2222",
+		"DA_USERNAME":   "user",
+		"DA_LOGIN_KEY":  "key",
+		"DA_DOMAIN":     "example.com",
+		"DOMAIN_FILTER": "other.com",
+	}
+	if _, err := Load(func(k string) string { return env[k] }); err == nil {
+		t.Fatal("expected filter mismatch")
+	}
+	env["DOMAIN_FILTER"] = "example.com"
+	cfg, err := Load(func(k string) string { return env[k] })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Zones) != 1 || cfg.Zones[0] != "example.com" {
+		t.Fatalf("zones %#v", cfg.Zones)
+	}
+}
